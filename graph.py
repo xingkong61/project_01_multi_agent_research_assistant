@@ -1,127 +1,87 @@
 """
-graph.py — LangGraph 工作流编排
-将四个节点用有向边串联起来，编译成可执行的工作流。
+graph.py — LangGraph 工作流（Supervisor 拓扑）
+
+拓扑不是写死的线性流水线，而是一个以 Supervisor 为中心的星型结构：
+Supervisor 本身是 LLM 节点，在运行时基于黑板状态动态决定 handoff 给谁；
+所有 worker 完成后都回到 Supervisor，直到它决定交给 Writer 并结束。
+
+  START → supervisor ◁────────────────────────────┐
+              │ LLM 运行时选路（规则护栏兜底）       │
+   ┌──────────┼──────────────┬──────────────┐     │
+   ▼          ▼              ▼              ▼     │
+ planner  researcher      critic         writer ─┴→ END
+   └──────────┴──────────────┴──── worker 完成后回 supervisor
+
+图本身只声明“谁可能 handoff 给谁”（拓扑可能性），
+“这一步实际去哪”由 Supervisor 智能体在运行时决定（Command(goto=...)）。
 """
 import os
 import sys
-# 把当前文件所在目录加入模块搜索路径，使直接 `python graph.py` 也能导入同目录模块
+
 from dotenv import load_dotenv
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
+
+# 直接 python graph.py 时也能导入同目录模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from agents import (
+    node_critic,
+    node_planner,
+    node_researcher,
+    node_supervisor,
+    node_writer,
+)
 from state import ResearchState
-from nodes import (node_planner, node_researcher, node_critic, node_writer, route_after_critic)
 
-# 加载 .env 环境变量
 load_dotenv()
 
-# ============================================================
-# 构建图
-# ============================================================
-def build_graph() -> StateGraph:
+# 图步数上限：N 个任务 + 多轮评审返工时节点跳转次数可能很多，
+# main.py 会按任务量/迭代上限动态传入更大的值（见 compute_recursion_limit），
+# 这里只给一个保守的默认值。
+DEFAULT_RECURSION_LIMIT = 120
+
+
+def compute_recursion_limit(max_iterations: int, expected_tasks: int = 6) -> int:
+    """按最坏路径估算图步数预算，避免任务多/返工轮数多时触顶抛 GraphRecursionError。
+
+    每轮"评审→返工"最多产生：supervisor + researcher(每个待办任务一次)
+    + supervisor + critic ≈ 2 + 2·tasks 步；再叠加初始规划、补题(planner)、
+    最终 writer 与若干 supervisor 单跳，留足余量并设下限。
     """
-    构建并编译 LangGraph StateGraph。
-
-    工作流：
-      START → planner → researcher → critic ─┐
-                        ↑                      │
-                        └── (revision_needed) ─┘
-                                   │
-                          (not revision_needed)
-                                   ↓
-                                  writer → END
-    """
-
-    # 1. 创建图构建器，指定状态 schema
-    builder = StateGraph(ResearchState)
-
-    # 2. 注册四个节点（节点名 → 节点函数）
-    builder.add_node("planner",    node_planner)
-    builder.add_node("researcher", node_researcher)
-    builder.add_node("critic",     node_critic)
-    builder.add_node("writer",     node_writer)
-
-    # 3. 添加固定边（执行顺序）
-    builder.add_edge(START,           "planner")   # 入口
-    builder.add_edge("planner",       "researcher") # 规划完就研究
-    builder.add_edge("researcher",    "critic")     # 研究完就审查
-
-    # 4. 添加条件边（Critic 的输出决定下一步）
-    #    route_after_critic 返回 "writer" 或 "researcher"
-    builder.add_conditional_edges(
-        source="critic",
-        path=route_after_critic,
-        path_map={
-            "writer":     END,        # 通过 → 进入写作 → 结束
-            "researcher": "researcher",  # 失败 → 打回研究（形成循环）
-        },
-    )
-
-    # 5. 编译图（生成可执行对象）
-    return builder.compile()
+    per_round = 2 + 2 * max(1, expected_tasks)
+    total = (max_iterations + 1) * per_round + 2 * expected_tasks + 10
+    return max(DEFAULT_RECURSION_LIMIT, total)
 
 
-# 全局编译（模块加载时执行一次）
+def build_graph():
+    """构建并编译研究智能体工作流图。"""
+    g = StateGraph(ResearchState)
+
+    g.add_node("supervisor", node_supervisor)
+    g.add_node("planner", node_planner)
+    g.add_node("researcher", node_researcher)
+    g.add_node("critic", node_critic)
+    g.add_node("writer", node_writer)
+
+    # 入口：先问调度员
+    g.add_edge(START, "supervisor")
+    # 每个 worker 干完活都回到调度员汇报
+    g.add_edge("planner", "supervisor")
+    g.add_edge("researcher", "supervisor")
+    g.add_edge("critic", "supervisor")
+    # 报告写完即结束
+    g.add_edge("writer", END)
+
+    # 注意：supervisor 没有静态出边——
+    # 它通过返回 Command(goto=<节点名>) 在运行时动态决定下一跳。
+    return g.compile()
+
+
+# 全局编译（导入即用）
 graph = build_graph()
 
 
-# ============================================================
-# 可视化：导出图形描述（用于 README / 文档）
-# ============================================================
-def print_graph_structure():
-    """打印图结构的文字描述"""
-    print("=" * 60)
-    print("Multi-Agent Research Assistant — LangGraph 工作流")
-    print("=" * 60)
-    print()
-    print("  [START] → [planner] → [researcher] → [critic]")
-    print("                                       │  ↑")
-    print("                              revision_needed")
-    print("                                 ↙      ↘")
-    print("                         [researcher]  [writer] → [END]")
-    print()
-    print("  Planner    ：将用户问题拆解为 3~6 个子任务")
-    print("  Researcher ：对每个子任务执行 ReAct 搜索循环")
-    print("  Critic     ：评审研究质量，决定是否返工")
-    print("  Writer     ：整合所有研究，输出结构化报告")
-    print()
-    print("  条件边逻辑：Critic 评分 < 12 或任一项 < 2 → 打回 Researcher")
-    print("             否则 → 进入 Writer → 结束")
-    print("  最大循环次数：5 次（防止死循环）")
-
-
-# ============================================================
-# 直接运行入口
-# ============================================================
 if __name__ == "__main__":
-    print_graph_structure()
-    print()
-    print("-" * 60)
-    print("运行示例（使用 Groq 免费 API + Tavily 搜索）")
-    print("-" * 60)
+    from main import main
 
-    query = input("请输入研究问题：").strip()
-    if not query:
-        query = "RAG 检索增强生成技术的最新进展"
-
-    print(f"\n正在研究：{query}\n")
-
-    # 带 checkpoint（可选，用于断点续跑）
-    # from langgraph.checkpoint.memory import MemorySaver
-    # graph = build_graph().compile(checkpointer=MemorySaver())
-    # config = {"configurable": {"thread_id": "1"}}
-    # result = graph.invoke({"query": query}, config=config)
-
-    result = graph.invoke({"query": query})
-
-    print("\n" + "=" * 60)
-    print("最终报告：")
-    print("=" * 60)
-    print(result.get("final_report", "[无报告]"))
-
-    print("\n" + "-" * 60)
-    print("执行统计：")
-    print(f"  循环次数：{result.get('loop_count', 0)}")
-    print(f"  完成任务：{list(result.get('completed_tasks', {}).keys())}")
-    print(f"  评审记录：{len(result.get('critiques', []))} 条")
-    print(f"  错误记录：{len(result.get('errors', []))} 条")
+    main()

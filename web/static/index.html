@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>研究文牍 · Multi-Agent Research</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="page">
+    <span class="margin-ornament left" aria-hidden="true">博 学 之 · 审 问 之</span>
+    <span class="margin-ornament right" aria-hidden="true">慎 思 之 · 明 辨 之</span>
+
+    <!-- 报头 -->
+    <header class="masthead">
+      <div class="rule double"></div>
+      <div class="flourish" aria-hidden="true">❦</div>
+      <h1 class="title">研 究 文 牍</h1>
+      <p class="subtitle">Multi-Agent Research Assistant &nbsp;·&nbsp; Est. MMXXV</p>
+      <div class="meta-line">
+        <span>Supervisor 调度</span><span class="dot">✦</span>
+        <span>Planner · Researcher · Critic · Writer</span><span class="dot">✦</span>
+        <span>带引用报告</span>
+      </div>
+      <div class="rule thin"></div>
+    </header>
+
+    <!-- 提问表单 -->
+    <section class="ask-form">
+      <label class="field-label" for="query">敬呈研究议题</label>
+      <textarea id="query" rows="3" placeholder="例：检索增强生成（RAG）于近数年之主要进展与局限……"></textarea>
+
+      <div class="controls">
+        <div class="control">
+          <label for="model">模型</label>
+          <input id="model" type="text" placeholder="默认" />
+        </div>
+        <div class="control">
+          <label for="iters">评审轮数</label>
+          <select id="iters">
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4" selected>4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+          </select>
+        </div>
+        <button id="submit" class="seal-btn" type="button">开始研究</button>
+      </div>
+    </section>
+
+    <!-- 进度区 -->
+    <section id="progress" class="ledger hidden">
+      <div class="ledger-head">
+        <span class="ledger-title">工作纪要</span>
+        <span id="statusLine" class="status-line">筹备中……</span>
+      </div>
+      <div class="rule thin"></div>
+      <ol id="traceLog" class="trace-log"></ol>
+    </section>
+
+    <!-- 报告区 -->
+    <article id="report" class="report hidden">
+      <div class="rule double"></div>
+      <div id="reportBody" class="report-body"></div>
+      <div class="report-foot">
+        <span id="reportMeta" class="report-meta"></span>
+        <a id="download" class="download" href="#" download="研究报告.md">⤓ 下载全文</a>
+      </div>
+    </article>
+
+    <footer class="colophon">
+      <div class="rule thin"></div>
+      <p>本卷由多智能体系统编纂，引用均来自可溯源之检索结果；如有讹误，敬请指正。</p>
+    </footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

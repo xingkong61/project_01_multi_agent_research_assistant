@@ -1,131 +1,152 @@
 """
-tests/test_routing.py — 核心路由逻辑的单元测试
-测试 Critic 评审 → 路由决策的边界情况。
+test_routing.py — Supervisor 动态路由的单元测试（全程离线，不调 LLM）
+
+校验 _allowed_next 计算出的合法 handoff 集合，以及
+decide_next 在"唯一合法路径"下不依赖 LLM 即可确定下一跳（保证安全默认）。
 """
-import pytest
-from nodes import route_after_critic
-from state import ResearchState
+from agents import _allowed_next, decide_next, normalize_sources
 
 
-class TestCriticRouter:
-    """
-    测试条件边路由函数 route_after_critic 的行为。
-    
-    路由规则：
-    - revision_needed == True  → 返回 "researcher"（打回重新研究）
-    - revision_needed == False → 返回 "writer"（进入写作）
-    """
+def _task(tid, status="pending"):
+    return {"id": tid, "description": f"任务 {tid}", "status": status}
 
-    # ---- 通过场景 ----
 
-    def test_revision_not_needed_returns_writer(self):
-        """当研究质量合格时，应进入 writer"""
-        state: ResearchState = {
-            "query": "RAG 技术的最新进展",
-            "tasks": ["RAG 核心原理", "RAG 最新优化方法"],
-            "completed_tasks": {
-                "RAG 核心原理": {"content": "RAG 是检索增强生成...", "sources": ["https://example.com"]},
-                "RAG 最新优化方法": {"content": "CRAG 是自适应检索...", "sources": ["https://example.com"]},
-            },
-            "revision_needed": False,
-            "loop_count": 1,
-            "critiques": ["研究质量良好"],
-            "final_report": "",
-            "errors": [],
+def _finding(tid):
+    return {"task_id": tid, "summary": "结论", "sources": [],
+            "confidence": "medium", "revision": 1}
+
+
+class TestAllowedNext:
+    def test_start_without_tasks_goes_to_planner(self):
+        self._assert_only({}, "planner")
+
+    def test_pending_no_critique_can_research_or_critic_choice(self):
+        state = {
+            "tasks": [_task("t1", "done"), _task("t2", "pending")],
+            "findings": {"t1": _finding("t1")},
+            "iteration": 0,
+            "max_iterations": 4,
         }
-        result = route_after_critic(state)
-        assert result == "writer"
+        assert set(_allowed_next(state)) == {"researcher", "critic"}
 
-    def test_revision_not_needed_with_empty_critiques(self):
-        """即使没有评审记录，质量不达标时 revision_needed=False → writer"""
-        state: ResearchState = {
-            "revision_needed": False,
+    def test_all_done_without_critique_goes_to_critic(self):
+        self._assert_only({
+            "tasks": [_task("t1", "done")],
+            "findings": {"t1": _finding("t1")},
+        }, "critic")
+
+    def test_pass_goes_to_writer(self):
+        self._assert_only({
+            "tasks": [_task("t1", "done")],
+            "findings": {"t1": _finding("t1")},
+            "critique": {"decision": "PASS"},
+            "iteration": 1,
+        }, "writer")
+
+    def test_replan_goes_to_planner(self):
+        self._assert_only({
+            "tasks": [_task("t1", "done")],
+            "findings": {"t1": _finding("t1")},
+            "critique": {"decision": "REPLAN", "missing_topics": ["新方向"]},
+            "iteration": 1,
+        }, "planner")
+
+    def test_revise_with_pending_forces_researcher(self):
+        self._assert_only({
+            "tasks": [_task("t1", "pending")],
+            "findings": {},
+            "critique": {"decision": "REVISE",
+                         "issues": [{"task_id": "t1", "issue": "来源不足"}]},
+            "iteration": 1,
+        }, "researcher")
+
+    def test_budget_exhausted_forces_writer_only_when_findings_exist(self):
+        # 有产出 + 轮次耗尽 → 强制收尾
+        self._assert_only({
+            "tasks": [_task("t1", "done")],
+            "findings": {"t1": _finding("t1")},
+            "critique": {"decision": "REVISE"},
+            "iteration": 4,
+            "max_iterations": 4,
+        }, "writer")
+
+        # 没产出时不能"强制通过"，仍需先规划
+        self._assert_only({
+            "tasks": [],
+            "findings": {},
+            "iteration": 4,
+            "max_iterations": 4,
+        }, "planner")
+
+    def test_all_done_old_revise_without_pending_goes_back_to_critic(self):
+        # 返工已做完（没有 pending），即便 critique 还停留在 REVISE，
+        # 也必须回到 Critic 复审，而不是反复派出没有任务可做的 Researcher 空转
+        state = {
+            "tasks": [_task("t1", "done")],
+            "findings": {"t1": _finding("t1")},
+            "critique": {"decision": "REVISE", "issues": []},
+            "iteration": 1,
         }
-        result = route_after_critic(state)
-        assert result == "writer"
+        self._assert_only(state, "critic")
 
-    # ---- 不合格 / 返工场景 ----
-
-    def test_revision_needed_returns_researcher(self):
-        """当研究质量不合格时，应打回 researcher"""
-        state: ResearchState = {
-            "revision_needed": True,
-            "critiques": ["缺少 2024 年最新数据，需要补充"],
-            "loop_count": 1,
+    def test_review_marker_routes_to_critic(self):
+        # Researcher 返工完成 / Planner 补题完成后写入 REVIEW 标记
+        state = {
+            "tasks": [_task("t1", "done")],
+            "findings": {"t1": _finding("t1")},
+            "critique": {"decision": "REVIEW"},
+            "iteration": 1,
         }
-        result = route_after_critic(state)
-        assert result == "researcher"
+        self._assert_only(state, "critic")
 
-    def test_revision_needed_missing_task(self):
-        """当有任务未完成时，应打回 researcher"""
-        state: ResearchState = {
-            "tasks": ["任务A", "任务B", "任务C"],
-            "completed_tasks": {
-                "任务A": {"content": "已完成A", "sources": []},
-            },
-            "revision_needed": True,
-            "critiques": ["任务B 和任务C 尚未完成"],
+    def test_review_with_pending_allows_choice(self):
+        state = {
+            "tasks": [_task("t1", "done"), _task("t2", "pending")],
+            "findings": {"t1": _finding("t1")},
+            "critique": {"decision": "REVIEW"},
+            "iteration": 1,
         }
-        result = route_after_critic(state)
-        assert result == "researcher"
+        assert set(_allowed_next(state)) == {"researcher", "critic"}
 
-    def test_revision_needed_with_full_completion(self):
-        """即使所有任务完成，如果 revision_needed=True 仍应返工"""
-        state: ResearchState = {
-            "tasks": ["任务A"],
-            "completed_tasks": {"任务A": {"content": "完成", "sources": []}},
-            "revision_needed": True,
-            "critiques": ["内容太浅，需要更深入分析"],
-        }
-        result = route_after_critic(state)
-        assert result == "researcher"
-
-    # ---- 边界场景 ----
-
-    def test_revision_needed_key_missing_defaults_to_writer(self):
-        """revision_needed 字段缺失时，默认进入 writer（安全默认值）"""
-        state: ResearchState = {
-            "query": "测试",
-            "revision_needed": None,
-        }
-        # route_after_critic 使用 state.get("revision_needed", False)
-        # None 被判定为 False → writer
-        result = route_after_critic(state)
-        assert result == "writer"
-
-    def test_revision_needed_explicit_false(self):
-        """revision_needed 显式为 False 时，进入 writer"""
-        state: ResearchState = {"revision_needed": False}
-        result = route_after_critic(state)
-        assert result == "writer"
+    def _assert_only(self, state, expected):
+        assert _allowed_next(state) == [expected]
+        # 唯一合法路径时不需要也不应该调用 LLM
+        target, _ = decide_next(state)
+        assert target == expected
 
 
-class TestStateSchema:
-    """测试状态 schema 的完整性"""
+class TestNormalizeSources:
+    def test_string_urls(self):
+        srcs = normalize_sources(["https://a.com/x", "https://b.com/y"])
+        assert [s["url"] for s in srcs] == [
+            "https://a.com/x", "https://b.com/y"]
 
-    def test_complete_state_has_all_required_fields(self):
-        """完整的 ResearchState 包含所有必要字段"""
-        state: ResearchState = {
-            "query": "测试问题",
-            "tasks": ["任务1", "任务2"],
-            "plan": "测试计划",
-            "completed_tasks": {"任务1": {"content": "...", "sources": []}},
-            "critiques": [],
-            "revision_needed": False,
-            "loop_count": 0,
-            "final_report": "",
-            "errors": [],
-        }
-        assert "query" in state
-        assert "tasks" in state
-        assert "revision_needed" in state
-        assert "loop_count" in state
+    def test_dict_items(self):
+        srcs = normalize_sources([
+            {"title": "A", "url": "https://a.com"},
+            {"title": "B", "url": "https://b.com"},
+        ])
+        assert srcs[0]["title"] == "A"
 
-    def test_state_accepts_empty_completed_tasks(self):
-        """空 completed_tasks 是合法的初始状态"""
-        state: ResearchState = {
-            "query": "测试",
-            "completed_tasks": {},
-        }
-        assert isinstance(state["completed_tasks"], dict)
-        assert len(state["completed_tasks"]) == 0
+    def test_dedupe_and_drop_invalid(self):
+        srcs = normalize_sources([
+            "https://a.com",
+            "https://a.com",
+            "not-a-url",
+            {"url": "ftp://bad", "title": "x"},
+        ])
+        assert len(srcs) == 1
+        assert srcs[0]["url"] == "https://a.com"
+
+    def test_strip_trailing_punctuation(self):
+        srcs = normalize_sources(["https://a.com/p,"])
+        assert srcs[0]["url"] == "https://a.com/p"
+
+    def test_urls_embedded_in_text(self):
+        srcs = normalize_sources("见 https://arxiv.org/abs/1234 这篇论文")
+        assert len(srcs) == 1
+        assert srcs[0]["url"] == "https://arxiv.org/abs/1234"
+
+    def test_empty(self):
+        assert normalize_sources(None) == []
+        assert normalize_sources([]) == []

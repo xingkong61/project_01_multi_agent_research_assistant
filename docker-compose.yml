@@ -1,0 +1,39 @@
+# 多智能体研究助手 · L2 部署编排
+# 用法：
+#   1) 与本项目同目录放一个 .env（含真实密钥），或用下面的环境变量注入
+#   2) docker compose up -d --build
+#   3) 通过 Nginx（见 deploy/nginx.conf）反代到本服务的 8000 端口并加 HTTPS
+
+services:
+  web:
+    build: .
+    image: multi-agent-research:latest
+    container_name: research-web
+    restart: unless-stopped
+    ports:
+      # 仅本机/内网暴露；公网访问交给前置 Nginx，不直接暴露此端口
+      - "127.0.0.1:8000:8000"
+    environment:
+      # —— LLM（阿里云百炼 OpenAI 兼容端点）——
+      LLM_MODEL: ${LLM_MODEL:-qwen3.8-flash}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LLM_API_KEY: ${LLM_API_KEY:?请在 .env 或环境提供 LLM_API_KEY}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-180}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-8192}
+      # —— 联网搜索（可选）——
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      # —— 访问控制（Basic Auth）：务必设置强口令 ——
+      WEB_USERNAME: ${WEB_USERNAME:?请设置 WEB_USERNAME}
+      WEB_PASSWORD: ${WEB_PASSWORD:?请设置 WEB_PASSWORD}
+      # —— 限流（进程内令牌桶）——
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-6}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-3}
+    volumes:
+      # 报告持久化（如启用落盘）；容器重启不丢
+      - ./reports:/app/reports
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

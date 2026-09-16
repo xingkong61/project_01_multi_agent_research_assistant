@@ -1,0 +1,20 @@
+# 构建镜像时排除：虚拟环境、缓存、密钥、生成物——绝不把 .env 打进镜像
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 密钥与本地配置（通过环境变量注入，不进镜像）
+.env
+.env.local
+*.local
+
+# 运行时产物与 IDE
+reports/
+.idea/
+.vscode/
+.git/
+*.log

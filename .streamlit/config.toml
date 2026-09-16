@@ -1,0 +1,14 @@
+[server]
+# 允许服务器外部访问；生产建议前置 Nginx + HTTPS，不直接暴露此端口
+address = "0.0.0.0"
+port = 8501
+headless = true
+# 一次研究可能跑数分钟，放宽 websocket / 空闲超时
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#4f6df5"
